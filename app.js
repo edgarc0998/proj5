@@ -2,6 +2,7 @@
 var db = null;
 //mongojs('localhost:27017/myGame', ['account','progress']);
 
+
 require('./Entity');
 require('./client/Inventory');
 
@@ -12,11 +13,12 @@ var serv = require('http').Server(app);
 app.get('/',function(req, res) {
 	res.sendFile(__dirname + '/client/index.html');
 });
-
 app.use('/client',express.static(__dirname + '/client'));
 
-serv.listen(process.env.PORT || 2000);
+var portNum = 2000;
+serv.listen(process.env.PORT || portNum);
 console.log("Server started.");
+console.log("Running on port number: " + portNum)
 
 var SOCKET_LIST = {};
 var DEBUG = false;
@@ -30,10 +32,6 @@ var start = false;
 
 var gameOver = true;
 var winner = '';
-
-var replayCount = 0;
-
-
 
 function isUsernameTaken(name) {
     if(PLAYER_LIST.includes(name)) {
@@ -51,36 +49,16 @@ io.sockets.on('connection', function(socket){
 	SOCKET_LIST[socket.id] = socket;
 	socket.name = '';
 
-	socket.on('replay', function(data) {
-		replayCount++;
-
-		if(replayCount == 4) {
-			start = true;
-		}
-	});
-
 	
     socket.on('signIn',function(data){
-
-		// if(PLAYER_LIST.length == 4 && !isUsernameTaken(data.username)) {
-		// 	Player.onConnect(socket,data.username, true);
-		// 	PLAYER_LIST.push(data.username);
-		// 	socket.name = data.username;
-		// 	socket.emit('signInResponse',{success:true, spectator: true});
-		// 	send = true;
-		// 	console.log("player count is: " + PLAYER_LIST.length);
-		// 	if(PLAYER_LIST.length == 4) {
-		// 		start = true;
-		// 	}			
-		// }
 		if(!isUsernameTaken(data.username)){
-			Player.onConnect(socket,data.username, false);
+			Player.onConnect(socket,data.username);
 			PLAYER_LIST.push(data.username);
 			socket.name = data.username;
-			socket.emit('signInResponse',{success:true, spectator: false});
+			socket.emit('signInResponse',{success:true});
 			send = true;
 			console.log("player count is: " + PLAYER_LIST.length);
-			if(PLAYER_LIST.length == 2) {
+			if(PLAYER_LIST.length == 4) {
 				start = true;
 			}
 
@@ -108,8 +86,8 @@ io.sockets.on('connection', function(socket){
 	});
 });
 
-var initPack = {player:[],bullet:[]};
-var removePack = {player:[],bullet:[]};
+var initPack = {player:[],bullet:[],landmine:[]};
+var removePack = {player:[],bullet:[],landmine:[]};
 
 Entity = function(param){
 	var self = {
@@ -118,6 +96,7 @@ Entity = function(param){
 		spdX:0,
 		spdY:0,
 		id:"",
+		
 	}
 	if(param){
 		if(param.x)
@@ -146,24 +125,29 @@ Entity.getFrameUpdateData = function(){
 		initPack:{
 			player:initPack.player,
 			bullet:initPack.bullet,
+			landmine:initPack.landmine,
 		},
 		removePack:{
 			player:removePack.player,
 			bullet:removePack.bullet,
+			landmine:removePack.landmine,
 		},
 		updatePack:{
 			player:Player.update(),
 			bullet:Bullet.update(),
+			landmine:LandMine.update(),
 		}
 	};
 	initPack.player = [];
 	initPack.bullet = [];
+	initPack.landmine = [];
 	removePack.player = [];
 	removePack.bullet = [];
+	removePack.landmine = [];
 	return pack;
 }
 
-
+var playerLandMines = 9;
 Player = function(param){
 	var self = Entity(param);
 	self.number = "" + Math.floor(10 * Math.random());
@@ -173,6 +157,7 @@ Player = function(param){
 	self.pressingUp = false;
 	self.pressingDown = false;
 	self.pressingAttack = false;
+	self.pressingQ = false;
 	self.mouseAngle = 0;
 	self.angle = 0;	
 	self.maxSpd = 10;
@@ -180,7 +165,7 @@ Player = function(param){
 	self.hpMax = 10;
 	self.score = 0;
 	self.inventory = new Inventory(param.socket,true);
-	self.spectator = param.spectator;
+	self.landmines = playerLandMines;
 	
 	var super_update = self.update;
 	self.update = function(){
@@ -191,9 +176,15 @@ Player = function(param){
 		if(self.pressingAttack){
 			self.shootBullet(self.mouseAngle);
 		}
+		else if(self.pressingQ){
+			if(self.landmines > 0){
+				self.launchMine(self.mouseAngle);
+				self.landmines--;
+			}
+		}
 	}
+	
 	self.shootBullet = function(angle){
-		if(!self.spectator) {
 		Bullet({
 			parent:self.id,
 			angle:angle,
@@ -201,6 +192,14 @@ Player = function(param){
 			y:self.y,
 		});
 	}
+	self.launchMine = function(angle){
+		LandMine({
+			parent:self.id,
+			angle:angle,
+			x:self.x,
+			y:self.y,
+			landmines:self.landmines,
+		});
 	}
 	
 	self.updateSpd = function(){
@@ -247,13 +246,12 @@ Player = function(param){
 	return self;
 }
 Player.list = {};
-Player.onConnect = function(socket,username, spectator){
+Player.onConnect = function(socket,username){
 
 	var player = Player({
 		username:username,
 		id:socket.id,
 		socket:socket,
-		spectator: spectator
 	});
 
 	socket.on('keyPress',function(data){
@@ -269,6 +267,20 @@ Player.onConnect = function(socket,username, spectator){
 			player.pressingAttack = data.state;
 		else if(data.inputId === 'mouseAngle')
 			player.mouseAngle = data.state;
+		else if(data.inputId === 'LandMine')
+			player.pressingQ = data.state;
+	});
+
+	socket.on('loseHP',function(data){
+		if(data.inputId === 'loseHP'){
+			player.hp = player.hp - 0.5;
+			if(player.hp <= 0){
+				player.hp = player.hpMax;
+				player.x = Math.random() * 800;
+				player.y = Math.random() * 500;
+				player.landmines = playerLandMines;					
+			}
+		}	
 	});
 	
 	
@@ -294,6 +306,7 @@ Player.onConnect = function(socket,username, spectator){
 		selfId:socket.id,
 		player:Player.getAllInitPack(),
 		bullet:Bullet.getAllInitPack(),
+		landmine:LandMine.getAllInitPack(),
 
 	});
 	
@@ -339,26 +352,27 @@ Bullet = function(param){
 		super_update();
 		
 		for(var i in Player.list){
-			var p = Player.list[i];
-			if(self.getDistance(p) < 32 && self.parent !== p.id){
-				p.hp -= 1;
-								
-				if(p.hp <= 0){
-					var shooter = Player.list[self.parent];
-					if(shooter)
-						shooter.score += 1;
-						send = true;
-						if(shooter.score == 1) {
-							gameOver = true;
-							winner = Player.list[self.parent].username;
-							// socket.emit('winner', {name: Player.list[self.parent].username});
-						}
-					p.hp = p.hpMax;
-					p.x = Math.random() * 800;
-					p.y = Math.random() * 500;					
-				}
-				self.toRemove = true;
-			}
+            var p = Player.list[i];
+            if(self.getDistance(p) < 32 && self.parent !== p.id){
+                p.hp -= 1;
+
+                if(p.hp <= 0){
+                    var shooter = Player.list[self.parent];
+                    if(shooter)
+                        shooter.score += 1;
+                        send = true;
+                        if(shooter.score == 10) {
+                            gameOver = true;
+
+                            winner = Player.list[self.parent].username;
+                            // socket.emit('winner', {name: Player.list[self.parent].username});
+                        }
+                    p.hp = p.hpMax;
+                    p.x = Math.random() * 800;
+                    p.y = Math.random() * 500;
+                }
+                self.toRemove = true;
+            }
 		}
 	}
 	self.getInitPack = function(){
@@ -382,6 +396,59 @@ Bullet = function(param){
 }
 Bullet.list = {};
 
+LandMine = function(param){
+	var self = Entity(param);
+	self.id = Math.random();
+	self.angle = param.angle;
+	self.spdX = 0;
+	self.spdY = 0;
+	self.parent = param.parent;
+	self.timer = 0;
+	self.toRemove = false;
+	var super_update = self.update;
+	self.update = function(){
+		super_update();
+		
+		for(var i in Player.list){
+			var p = Player.list[i];
+			if(self.getDistance(p) < 32 && self.parent !== p.id){
+				p.hp -= 1;
+								
+				if(p.hp <= 0){
+					var shooter = Player.list[self.parent];
+					if(shooter)
+						shooter.score += 1;
+						send = true;
+					p.hp = p.hpMax;
+					p.x = Math.random() * 800;
+					p.y = Math.random() * 500;			
+					p.landmines = playerLandMines;		
+				}
+				self.toRemove = true;
+			}
+		}
+	}
+	self.getInitPack = function(){
+		return {
+			id:self.id,
+			x:self.x,
+			y:self.y,
+		};
+	}
+	self.getUpdatePack = function(){
+		return {
+			id:self.id,
+			x:self.x,
+			y:self.y,		
+		};
+	}
+	
+	LandMine.list[self.id] = self;
+	initPack.landmine.push(self.getInitPack());
+	return self;
+}
+LandMine.list = {};
+
 Bullet.update = function(){
 	var pack = [];
 	for(var i in Bullet.list){
@@ -396,6 +463,20 @@ Bullet.update = function(){
 	return pack;
 }
 
+LandMine.update = function(){
+	var pack = [];
+	for(var i in LandMine.list){
+		var landmine = LandMine.list[i];
+		landmine.update();
+		if(landmine.toRemove){
+			delete LandMine.list[i];
+			removePack.landmine.push(landmine.id);
+		} else
+			pack.push(landmine.getUpdatePack());		
+	}
+	return pack;
+}
+
 Bullet.getAllInitPack = function(){
 	var bullets = [];
 	for(var i in Bullet.list)
@@ -403,29 +484,34 @@ Bullet.getAllInitPack = function(){
 	return bullets;
 }
 
-
+LandMine.getAllInitPack = function(){
+	var landmines = [];
+	for(var i in LandMine.list)
+		landmines.push(LandMine.list[i].getInitPack());
+	return landmines;
+}
 
 setInterval(function(){
 	var packs = Entity.getFrameUpdateData();
 	for(var i in SOCKET_LIST){
 		var socket = SOCKET_LIST[i];
-
 		if(gameOver) {
-			console.log("Game is over");
-			console.log("The winner is: " + winner);
-			socket.emit('winner', {name: winner});
-
+            console.log("Game is over");
+            console.log("The winner is: " + winner);
+            socket.emit('winner', {name: winner});
+            for(var i in Player.list) {
+                Player.list[i].score = 0;
+            }
 		}
-
-
+		
 		if(send == true) {
 
 			for(var i in Player.list) {
 				var score2 = Player.list[i].score;
 				var name2 = Player.list[i].username;
-				
 				score.push(score2);
 				name.push(name2);
+				
 			}
 
 
@@ -444,8 +530,8 @@ setInterval(function(){
 	}
 
 	send = false;
+	start = false;
 	gameOver = false;
-
 	
 },1000/25);
 
